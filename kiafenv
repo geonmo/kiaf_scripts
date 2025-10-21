@@ -1,0 +1,187 @@
+#!/bin/bash
+
+function help {
+echo "This command load the ALICE environment for KIAF"
+usage
+}
+function usage {
+echo "options:"
+echo " -p, --pod    : Load the PoD environment"
+echo " -t, --token  : Create alien session token"
+echo " -h, --help   : Display help"
+echo
+}
+if ! test -s $HOME/.alice_env/alice_env.conf ; then
+if test ! -d $HOME/.alice_env ; then
+mkdir $HOME/.alice_env ; fi
+echo "export ALIPHYSICS_VERSION="slc9-vAN-20240216_O2-1"" >> $HOME/.alice_env/alice_env.conf
+fi
+
+ALIPHYSICS_VERSION=""
+ALICE_ROOT_VERSION=""
+CVMFS_PACKAGES_VERSION=""
+alien_API_USER=$USER
+
+source /cvmfs/alice.cern.ch/etc/login.sh
+source $HOME/.alice_env/alice_env.conf
+
+## Override alienv due to bug #https://github.com/alisw/ali-bot/pull/1302
+alias alienv="/alice/home/kiaf/alienv"
+
+STOP=no
+POD=no
+TOKEN=no
+until [ -z "$1" ]; do
+  case "$1" in
+  -p|--pod)	POD=yes;		shift;;
+  -t|--token)	TOKEN=yes;		shift;;
+  -h|--help)	STOP=yes; help; shift;;
+  --) shift ; break ;;
+  *) echo "$1 is wrong option" ; usage; exit 1 ;;
+  esac
+done
+
+if [ $STOP = no ]; then
+#common
+DataSetStorage='root://kiaf-ui.sdfarm.kr//<path>'
+StageReqRepository='/pool/stagereqrepo'
+
+#user
+AliPhysicsVersion=$ALIPHYSICS_VERSION
+AliRootVersion=$ALICE_ROOT_VERSION
+CVMFSPackagesVersion=$CVMFS_PACKAGES_VERSION
+
+
+if [ -f /etc/os-release ]; then
+ . /etc/os-release
+ OS_VERSION=$VERSION_ID
+fi
+
+
+#local
+PoD_version='3.16'
+PoDLocation=/pool/PoD/"$PoD_version"
+
+which aliroot >> /dev/null 2>&1
+
+if [[ $? != 0 ]]; then
+ echo "Load the ALICE environment"
+ if [ -z $CVMFS_PACKAGES_VERSION ] ; then
+   if [ -z $ALIPHYSICS_VERSION ] ; then
+     eval `alienv printenv VO_ALICE@AliRoot::"$AliRootVersion"`
+     which aliroot >> /dev/null 2>&1
+     if [[ $? == 0 ]]; then
+       echo "Set the AliRoot::$AliRootVersion environment"; else
+       echo -e "Can't set the AliRoot::$AliRootVersion environment\nPlease check AliRoot::$AliRootVersion is supported at alimonitor.cern.ch/packages"; 
+     fi
+   else
+     case $OS_VERSION in 
+       7*)
+           AliPhysicsVersion=${AliPhysicsVersion#slc9-}
+           ;;
+       9*)
+           if [[ ! $AliPhysicsVersion == slc9-* ]]; then
+             AliPhysicsVersion=slc9-vAN-20240216_O2-1
+           fi
+           ;;
+     esac
+     eval `alienv printenv VO_ALICE@AliPhysics::"$AliPhysicsVersion"`
+     which aliroot >> /dev/null 2>&1
+     if [[ $? == 0 ]]; then
+       echo "Set the AliPhysics::$AliPhysicsVersion environment"; else
+       echo -e "Can't set the AliRoot::$AliPhysicsVersion environment\nPlease check AliRoot::$AliPhysicsVersion is supported at alimonitor.cern.ch/packages"; fi
+   fi
+  else
+  eval `alienv printenv VO_ALICE@"$CVMFSPackagesVersion"`
+   which root >> /dev/null 2>&1
+   if [[ $? == 0 ]]; then
+     echo "Set the $CVMFSPackagesVersion environment"; else
+     echo -e "Can't set the $CVMFSPackagesVersion environment\nPlease check $CVMFSPackagesVersion is supported at alimonitor.cern.ch/packages"; fi
+  fi
+fi
+
+if [ $TOKEN = yes ]; then
+echo "Init alien token"
+# Create proxy and token if necessary
+if [ "$( alien_whoami 2> /dev/null | tr -d ' ' )" == '' ] ; then
+  alien-token-destroy
+  #xrdgsiproxy destroy
+  alien-token-init $alien_API_USER
+  true  # non-fatal
+fi
+if test ! -d $HOME/.tmp ; then
+mkdir $HOME/.tmp ; fi
+ cp -f /tmp/x509up_u$UID $HOME/.tmp/.
+ cp -f /tmp/tokencert_$UID.pem $HOME/.tmp/.
+ cp -f /tmp/tokenkey_$UID.pem $HOME/.tmp/.
+ export JALIEN_TOKEN_CERT=$HOME/.tmp/tokencert_$UID.pem
+ export JALIEN_TOKEN_KEY=$HOME/.tmp/tokenkey_$UID.pem
+fi
+
+if [ $POD = yes ]; then
+echo "Load PoD environment"
+source $PoDLocation/PoD_env.sh
+
+export LC_ALL=C
+
+# AliEn and Grid-specific variables
+export GCLIENT_SERVER_LIST="pcapiserv03.cern.ch:10000|"
+export X509_USER_PROXY=/tmp/x509up_u$UID
+export X509_CERT_DIR=$ALIEN_ROOT/globus/share/certificates
+
+# Maxmimum time PoD Agents are kept waiting in the HTCondor queue. After that
+# time they are removed and need to be resubmitted
+PoDAgentWaitExpiry_Secs=86400
+
+# PoD configuration
+mkdir -p $HOME/.PoD
+
+# Extra configuration for xproofd: datasets
+cat > $HOME/.PoD/user_xpd.cf0 << _EndOfXpdCf_
+xpd.datasetsrc alien cache:/tmp/ali-ds-cache urltemplate:$DataSetStorage cacheexpiresecs:86400
+xpd.stagereqrepo dir:$StageReqRepository
+_EndOfXpdCf_
+
+# Custom PoD.cfg file modifictions
+#PoDCfg=$HOME/.PoD/PoD.cfg
+#if [ -e "$PoDCfg" ] ; then
+
+  # Append custom lines to HTCondor job descriptions
+  #sed -e 's#^options_file.*condor.*$#options_file=$HOME/.PoD/Job.condor.option#' -i "$PoDCfg"
+
+  # Turn off packet forwarding
+  #sed -e 's#^\(packet_forwarding\)=.*$#\1=no#' -i "$PoDCfg"
+
+  # Patterns for proof.conf lines
+  #sed -e 's#^\(proof_cfg_entry_pattern\)=.*$#\1=worker %user%@%ipv4% port=%port%#' -i "$PoDCfg"
+
+  # Do we have master pattern?
+  #if grep -q proof_cfg_master_pattern "$PoDCfg" ; then
+    #sed -e 's|^\(proof_cfg_master_pattern\)=.*$|\1=master %ipv4%|' -i "$PoDCfg"
+  #else
+    #sed -e 's|^\(proof_cfg_entry_pattern=.*$\)|\1\nproof_cfg_master_pattern=master %ipv4%|' -i "$PoDCfg"
+  #fi
+
+  # Do we have "use IPs"?
+  #if grep -q use_ip_instead_of_host "$PoDCfg" ; then
+    #sed -e 's|^\(use_ip_instead_of_host\)=.*$|\1=yes|' -i "$PoDCfg"
+  #else
+    #sed -e 's|^\(proof_cfg_master_pattern=.*$\)|\1\nuse_ip_instead_of_host=yes|' -i "$PoDCfg"
+  #fi
+
+#fi
+
+# Our custom HTCondor lines
+cat > $HOME/.PoD/Job.condor.option <<_EndOfCondor_
+periodic_remove = (JobStatus == 1) && ((CurrentTime - EnteredCurrentStatus) > $PoDAgentWaitExpiry_Secs)
+_EndOfCondor_
+
+# Prepares the script for the workers environment
+WorkerEnv=$HOME/.PoD/user_worker_env.sh
+cat > "$WorkerEnv" <<_EndOfEnv_
+touch "$X509_USER_PROXY"
+chmod 0600 "$X509_USER_PROXY"
+echo -n "$GridProxyBase64" | base64 -di | gunzip > "$X509_USER_PROXY"
+_EndOfEnv_
+fi
+fi
